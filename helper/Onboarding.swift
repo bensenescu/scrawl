@@ -781,15 +781,30 @@ final class HelperWindowKeys {
   private var previous: NSRunningApplication?
 
   /// ⌘W closes the window while `enabled` (Settings turns it off while a shortcut recorder
-  /// listens, so ⌘W can be recorded).
+  /// listens, so ⌘W can be recorded). The helper has no menu bar, so the editing keys (⌘X ⌘C
+  /// ⌘V ⌘A ⌘Z) are sent down the responder chain here, for the text fields (the API key).
   init(window: @escaping () -> NSWindow?, enabled: @escaping () -> Bool = { true }) {
     monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
       let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
-      guard flags == .command, event.charactersIgnoringModifiers?.lowercased() == "w", enabled(),
-            let window = window()
+      guard flags == .command, enabled(), let key = event.charactersIgnoringModifiers?.lowercased()
       else { return event }
-      window.performClose(nil)
-      return nil
+      if key == "w", let window = window() {
+        window.performClose(nil)
+        return nil
+      }
+      let editing: [String: Selector] = [
+        "x": #selector(NSText.cut(_:)),
+        "c": #selector(NSText.copy(_:)),
+        "v": #selector(NSText.paste(_:)),
+        "a": #selector(NSText.selectAll(_:)),
+        "z": Selector(("undo:")),
+      ]
+      if let action = editing[key], window()?.firstResponder is NSText,
+         NSApp.sendAction(action, to: nil, from: nil)
+      {
+        return nil
+      }
+      return event
     }
   }
 

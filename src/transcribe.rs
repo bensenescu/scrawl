@@ -1,8 +1,9 @@
 //! Transcription: Apple's SpeechAnalyzer through `scrawl-helper` (measured word and segment
 //! timings), Hex when `"transcriber": "hex"` is set and Hex is connected (`crate::hex`; word
-//! times estimated), or a program of the user's when `"transcriber": "command"`
-//! (`crate::command_transcriber`). Any Hex or command trouble falls back to Apple for that
-//! recording.
+//! times estimated), OpenAI's GPT Live Transcribe when `"transcriber": "openai"` and a key is
+//! saved (`crate::live_transcribe`; streamed while recording, word times estimated), or a
+//! program of the user's when `"transcriber": "command"` (`crate::command_transcriber`). Any
+//! Hex, OpenAI or command trouble falls back to Apple for that recording.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -17,6 +18,7 @@ pub enum Engine {
     #[default]
     Apple,
     Hex,
+    OpenAi,
     Command,
 }
 
@@ -25,6 +27,7 @@ impl Engine {
         match name.trim().to_ascii_lowercase().as_str() {
             "apple" => Some(Self::Apple),
             "hex" => Some(Self::Hex),
+            "openai" => Some(Self::OpenAi),
             "command" => Some(Self::Command),
             _ => None,
         }
@@ -34,6 +37,7 @@ impl Engine {
         match self {
             Self::Apple => "apple",
             Self::Hex => "hex",
+            Self::OpenAi => "openai",
             Self::Command => "command",
         }
     }
@@ -52,6 +56,7 @@ impl Engine {
             1 => Self::Apple,
             2 => Self::Hex,
             3 => Self::Command,
+            4 => Self::OpenAi,
             _ => Self::configured(),
         }
     }
@@ -67,6 +72,7 @@ pub const LOCAL_ENGINE_TITLE: &str = "Parakeet (on this PC)";
 static OVERRIDE: AtomicU8 = AtomicU8::new(0);
 static LOGGED_NOT_CONNECTED: std::sync::Once = std::sync::Once::new();
 static LOGGED_NO_COMMAND: std::sync::Once = std::sync::Once::new();
+static LOGGED_NO_KEY: std::sync::Once = std::sync::Once::new();
 
 /// What the Settings window's Transcription controls show. A Hex preference stays saved while Hex
 /// is away, but the active choice follows what recordings would really use.
@@ -124,6 +130,7 @@ pub fn set_override(engine: Engine) {
             Engine::Apple => 1,
             Engine::Hex => 2,
             Engine::Command => 3,
+            Engine::OpenAi => 4,
         },
         Ordering::Relaxed,
     );
@@ -137,45 +144,71 @@ pub fn transcribe(wav: Option<&Path>, audio: Option<&RecordedAudio>) -> Transcri
             ..Default::default()
         };
     };
-    let live = audio.live.take();
+    // A stream started with the recording belongs to one engine: OpenAI's goes to OpenAI, and
+    // Apple's is only used when Apple is the answer.
+    let (openai_live, apple_live) = match audio.live.take() {
+        Some(live) if live.is_openai() => (Some(live), None),
+        Some(live) => (None, Some(live)),
+        None => (None, None),
+    };
     let engine = Engine::preferred();
     run(
         engine,
         || match engine {
             Engine::Apple => Ok(None),
             Engine::Hex => try_hex(audio),
+            Engine::OpenAi => try_openai(openai_live, audio),
             Engine::Command => try_command(wav, audio),
         },
         || {
-            live.and_then(|live| finish_live(live, audio))
+            apple_live
+                .and_then(|live| finish_live(live, audio).ok())
                 .unwrap_or_else(|| apple(wav))
         },
     )
 }
 
-/// The transcript made while recording, or `None` (logged) to transcribe the WAV instead.
-fn finish_live(
-    live: crate::live_transcribe::Live,
-    audio: &RecordedAudio,
-) -> Option<TranscriptData> {
+/// The transcript made while recording; an error (logged) means to transcribe the WAV instead.
+fn finish_live(live: crate::live_transcribe::Live, audio: &RecordedAudio) -> Result<TranscriptData> {
     match live.finish(&audio.wav_bytes) {
         Ok(done) => {
             crate::capture::scrawl_log(format!(
-                "Live transcription: {} words, {} of {} ms streamed, tail {} ms",
+                "Live transcription ({}): {} words, {} of {} ms streamed, tail {} ms",
+                done.transcript.source,
                 done.transcript.words.len(),
                 done.streamed_samples as u64 * 1_000 / 16_000,
                 audio.duration_ms,
                 done.tail_ms
             ));
-            Some(done.transcript)
+            Ok(done.transcript)
         }
         Err(error) => {
             crate::capture::scrawl_log(format!(
                 "Live transcription failed, transcribing the recording: {error:#}"
             ));
-            None
+            Err(error)
         }
     }
+}
+
+/// OpenAI: the stream that ran with the recording, else the WAV streamed now (an imported or
+/// reprocessed recording). Without a saved key there is nothing to ask (logged once).
+fn try_openai(
+    live: Option<crate::live_transcribe::Live>,
+    audio: &RecordedAudio,
+) -> Result<Option<TranscriptData>> {
+    if let Some(live) = live {
+        return finish_live(live, audio).map(Some);
+    }
+    if !crate::live_transcribe::openai_configured() {
+        LOGGED_NO_KEY.call_once(|| {
+            crate::capture::scrawl_log(format!(
+                "OpenAI preferred but no API key is saved; using {LOCAL_ENGINE_TITLE}"
+            ));
+        });
+        return Ok(None);
+    }
+    crate::live_transcribe::transcribe_wav_openai(&audio.wav_bytes).map(Some)
 }
 
 /// The preferred engine when it isn't Apple, with Apple as the answer to anything it can't do.
@@ -189,6 +222,7 @@ fn run(
     let name = match engine {
         Engine::Apple => return apple(),
         Engine::Hex => "Hex",
+        Engine::OpenAi => "OpenAI",
         Engine::Command => "Command",
     };
     match other() {
@@ -280,6 +314,7 @@ mod tests {
         assert_eq!(Engine::parse("hex"), Some(Engine::Hex));
         assert_eq!(Engine::parse(" Apple "), Some(Engine::Apple));
         assert_eq!(Engine::parse("Command"), Some(Engine::Command));
+        assert_eq!(Engine::parse("OpenAI"), Some(Engine::OpenAi));
         assert_eq!(Engine::parse("whisper"), None);
         assert_eq!(Engine::default(), Engine::Apple);
     }
@@ -298,6 +333,7 @@ mod tests {
     fn the_preferred_engine_is_used_when_it_answers() {
         for (engine, source) in [
             (Engine::Hex, "hex:parakeet_v3"),
+            (Engine::OpenAi, "openai:gpt-live-transcribe"),
             (Engine::Command, "command:whisper-scrawl"),
         ] {
             let result = run(
@@ -311,7 +347,7 @@ mod tests {
 
     #[test]
     fn an_unavailable_or_failing_engine_falls_back_to_apple() {
-        for engine in [Engine::Hex, Engine::Command] {
+        for engine in [Engine::Hex, Engine::OpenAi, Engine::Command] {
             let apple = || named("speech-analyzer");
             assert_eq!(run(engine, || Ok(None), apple).source, "speech-analyzer");
             let failed = run(engine, || Err(anyhow::anyhow!("took too long")), apple);

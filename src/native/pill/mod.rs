@@ -193,10 +193,12 @@ impl MetalPipelines {
         let device = metal::Device::system_default().ok_or("No Metal device available")?;
         let queue = device.new_command_queue();
 
-        let metallib_bytes = include_bytes!(concat!(env!("OUT_DIR"), "/pill.metallib"));
-        let library = device
-            .new_library_with_data(metallib_bytes)
-            .map_err(|e| format!("Failed to load pill.metallib: {e}"))?;
+        let library = crate::metal_shader::library(
+            &device,
+            "pill",
+            include_bytes!(concat!(env!("OUT_DIR"), "/pill.metallib")),
+            include_str!("pill.metal"),
+        )?;
 
         let make_pipeline = |vs_name: &str, fs_name: &str, premul_blend: bool| -> Result<RenderPipelineState, String> {
             let vs = library

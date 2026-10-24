@@ -7,17 +7,33 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # SCRAWL_APP_DIR builds the signed bundle somewhere else (staging for remote installs, see
 # install-app-remote.sh); SCRAWL_NO_LAUNCH=1 skips the ~/bin link and the restart.
 APP_DIR="${SCRAWL_APP_DIR:-${HOME}/Applications/Scrawl.app}"
+# The bundle is built beside its final place and swapped in whole: macOS's App Management
+# refuses writes inside an existing app bundle (e.g. /Applications/Scrawl.app) from a terminal
+# without that permission, but allows replacing the bundle.
+STAGE_DIR="${APP_DIR%.app}.staging.app"
+rm -rf "${STAGE_DIR}"
+FINAL_APP_DIR="${APP_DIR}"
+APP_DIR="${STAGE_DIR}"
 CONTENTS_DIR="${APP_DIR}/Contents"
 MACOS_DIR="${CONTENTS_DIR}/MacOS"
 RESOURCES_DIR="${CONTENTS_DIR}/Resources"
 FRAMEWORKS_DIR="${CONTENTS_DIR}/Frameworks"
 SIGN_ID="Developer ID Application: Christopher Langton (QC99C9JE59)"
+# Without Kit's identity, a self-signed "Scrawl Dev" certificate (trusted for code signing in
+# the login keychain) keeps TCC grants across rebuilds; ad-hoc signing loses them every build.
+DEV_SIGN_ID="Scrawl Dev"
 SPARKLE_PUBLIC_KEY="mIek27lttJe8cIBqVZFhh6reRKjpTx1h9ZY9OKWPtuM="
 
 cd "${REPO_DIR}"
+export PATH="${HOME}/.cargo/bin:${PATH}"
 chmod +x "${REPO_DIR}/scripts/setup-sparkle.sh" "${REPO_DIR}/scripts/release-app.sh" 2>/dev/null || true
 SPARKLE_DIR="$("${REPO_DIR}/scripts/setup-sparkle.sh" 2>/dev/null || true)"
-taskpolicy -c utility cargo build -j 3
+BUILD_FEATURES=()
+if ! xcrun --sdk macosx --find metal >/dev/null 2>&1; then
+  echo "no Metal toolchain; building with --features metal-source (shaders compile at launch)" >&2
+  BUILD_FEATURES=(--features metal-source)
+fi
+taskpolicy -c utility cargo build -j 3 "${BUILD_FEATURES[@]}"
 
 mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}" "${FRAMEWORKS_DIR}" "${HOME}/bin"
 
@@ -90,10 +106,14 @@ cat > "${CONTENTS_DIR}/Info.plist" <<PLIST
 </plist>
 PLIST
 
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "${SIGN_ID}"; then
+IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+if grep -q "${SIGN_ID}" <<<"${IDENTITIES}"; then
   IDENTITY="${SIGN_ID}"
+elif grep -q "\"${DEV_SIGN_ID}\"" <<<"${IDENTITIES}"; then
+  IDENTITY="${DEV_SIGN_ID}"
 else
   IDENTITY="-"
+  echo "no signing identity; signing ad hoc (macOS will ask for permissions again after each rebuild)" >&2
 fi
 if [[ -d "${FRAMEWORKS_DIR}/Sparkle.framework/Versions/B" ]]; then
   SPARKLE_VER="${FRAMEWORKS_DIR}/Sparkle.framework/Versions/B"
@@ -107,10 +127,10 @@ codesign --force --sign "${IDENTITY}" --identifier "dev.kitlangton.scrawl.helper
 codesign --force --sign "${IDENTITY}" --identifier "dev.kitlangton.scrawl" "${APP_DIR}"
 
 if [[ "${SCRAWL_NO_LAUNCH:-0}" == "1" ]]; then
+  rm -rf "${FINAL_APP_DIR}"
+  mv "${STAGE_DIR}" "${FINAL_APP_DIR}"
   exit 0
 fi
-
-ln -sf "${MACOS_DIR}/scrawl" "${HOME}/bin/scrawl"
 
 scrawl_running() {
   local status=0
@@ -133,6 +153,10 @@ if scrawl_running; then
   echo "the old Scrawl is still running; quit it and run this again" >&2
   exit 1
 fi
+rm -rf "${FINAL_APP_DIR}"
+mv "${STAGE_DIR}" "${FINAL_APP_DIR}"
+APP_DIR="${FINAL_APP_DIR}"
+ln -sf "${APP_DIR}/Contents/MacOS/scrawl" "${HOME}/bin/scrawl"
 open -a "${APP_DIR}" || (sleep 0.3 && open -n -a "${APP_DIR}")
 sleep 0.3
 pgrep -fl "Scrawl.app/Contents/MacOS/scrawl"

@@ -742,12 +742,12 @@ fn overlay_pipeline(device: &metal::DeviceRef) -> Result<RenderPipelineState, St
 }
 
 fn overlay_library(device: &metal::DeviceRef) -> Result<metal::Library, String> {
-    device
-        .new_library_with_data(include_bytes!(concat!(
-            env!("OUT_DIR"),
-            "/laser_overlay.metallib"
-        )))
-        .map_err(|e| format!("Could not load laser shader library: {e}"))
+    crate::metal_shader::library(
+        device,
+        "laser_overlay",
+        include_bytes!(concat!(env!("OUT_DIR"), "/laser_overlay.metallib")),
+        include_str!("laser_overlay.metal"),
+    )
 }
 
 fn specialised_pipeline(
@@ -1549,6 +1549,10 @@ mod tests {
     #[test]
     fn shader_targets_the_minimum_supported_macos() {
         let library = include_bytes!(concat!(env!("OUT_DIR"), "/laser_overlay.metallib"));
+        if library.is_empty() {
+            // Built without the Metal toolchain: the shader is compiled at launch instead.
+            return;
+        }
         let text = String::from_utf8_lossy(library);
         let marker = "-apple-macosx";
         let at = text.find(marker).expect("metallib names its target");

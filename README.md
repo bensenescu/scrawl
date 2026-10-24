@@ -166,11 +166,12 @@ granted and each on-demand sheet: `target/debug/scrawl-helper onboarding --rende
 
 **Settings…** in the menu bar (⌘, while the menu is open) opens a small window with six panes:
 
-- **General**: Launch at login, Send dev-site captures to OpenCode, and the two shortcuts, Record
-  (`⌥⇧S`) and Paste last capture (`⌥⇧V`, which can be turned off).
+- **General**: Launch at login, Send dev-site captures to OpenCode, the two shortcuts, Record
+  (`⌥⇧S`) and Paste last capture (`⌥⇧V`, which can be turned off), and [Dictation](#dictation)
+  (tap Right ⌘, off by default).
 - **Recording**: the microphone, with its input level, the transcriber (Apple Speech with its
-  language, Hex while it runs, with its model and language, or Command when it's configured) and,
-  under Experimental, Video export.
+  language, Hex while it runs, with its model and language, OpenAI with your API key and language,
+  or Command when it's configured) and, under Experimental, Video export.
 - **Storage**: how long recordings are kept, where new captures go (Change…/Reset on macOS, `"capturesDir"` in
   `~/.config/scrawl/config.json` everywhere; captures already made stay put, and an unusable folder falls back to the built-in one), how much space they take, and Show in Finder.
 - **Permissions**: the onboarding checklist, so a permission can be turned on later.
@@ -224,6 +225,22 @@ While picking a target, the island shows the modes **Area**, **Window**, **Scree
 - Area: drag a region. Window: click a window. Screen and iPhone: `⏎`, `S`, `⌥⇧S`, **Record**, or
   clicking the selected mode again starts recording (`⏎`/`⌥⇧S` record the full screen from Area and
   Window too)
+
+## Dictation
+
+Sometimes the screen doesn't matter and you just want to talk to the agent. Turn on **Dictation**
+in Settings › General (`"dictation": true` in `~/.config/scrawl/config.json`), then **tap the
+right ⌘ key**, talk, and tap it again: Scrawl records the microphone alone, no screen, no bundle,
+and pastes the words into the app in front (they're on the clipboard too). Holding the key works
+as push-to-talk: let go and the words are pasted. The capsule shows the timer while it listens and
+Processing until the paste lands. `Esc` cancels, and any key typed while Right ⌘ is still held
+from the start makes it an ordinary ⌘ shortcut, so `⌘C` with the right hand still copies.
+
+It uses whichever transcriber Settings › Recording names. With [OpenAI](#openai-cloud) the words
+stream up while you talk, so the paste follows the stop within about a second; Apple Speech
+transcribes after it. Press `⌥⇧S` while dictating to paste what you've said and start a screen
+capture as the keys come up, when you realize the screen matters after all. Dictation needs
+Accessibility (the key tap) and Microphone.
 
 ## Sending captures of a dev site to its session
 
@@ -710,7 +727,7 @@ Or in
 { "transcriber": "hex", "hexModel": "whisper_large_v3_turbo", "hexLanguage": "nl" }
 ```
 
-`"transcriber"` is `"apple"` (default), `"hex"` or `"command"` (below); `hexModel` defaults to the
+`"transcriber"` is `"apple"` (default), `"hex"`, `"openai"` or `"command"` (below); `hexModel` defaults to the
 first ready one of `parakeet_unified_en`, `parakeet_v3`, `parakeet_v2`, `whisper_large_v3_turbo`.
 Scrawl never downloads or prepares a Hex model: install it in Hex first.
 
@@ -738,6 +755,31 @@ and ignore the hint.
 - `scrawl hex status` shows whether Hex is connected, its ready models and what the next recording
   will use. `scrawl reprocess <bundle> --out … --transcriber hex|apple|command` (also
   `scrawl import`) picks an engine for one run.
+
+### OpenAI (cloud)
+
+OpenAI's GPT Live Transcribe (`gpt-live-transcribe`, the Realtime API's transcription session) is
+faster and often more accurate than the on-device models, at the price of sending your voice to
+OpenAI on your own key. Choose **OpenAI (cloud)** under Settings › Recording › **Transcription**,
+paste an API key into **API key** and press Save; **Language** is the code OpenAI is told to
+expect (`en` by default). Or in `~/.config/scrawl/config.json`:
+
+```json
+{ "transcriber": "openai", "openaiApiKey": "sk-…", "openaiLanguage": "en" }
+```
+
+- The key is kept in `config.json`, which only you can read (`0600`), goes only to
+  `api.openai.com`, and is never logged or shown again (Settings says "Key saved"; Remove forgets
+  it). Audio is billed to the key's account.
+- While a Mac capture (or a dictation) records, `scrawl-helper openai-stream` streams the
+  microphone up as you talk, committing each stretch of speech after a pause, so finishing waits
+  only for the last stretch. The transcript says `"source": "openai:gpt-live-transcribe"` and
+  `"estimated": true`: OpenAI times each stretch, not each word, so words are spread across their
+  stretch by length as with Hex, and spoken cues don't cut keyframes.
+- If the key is refused, the network is down or OpenAI takes too long, that recording uses Apple
+  Speech and the log says why (`~/Library/Logs/Scrawl`). Without a saved key, OpenAI is never asked.
+- iPhone and imported recordings, and `scrawl reprocess … --transcriber openai`, stream the finished
+  audio the same way.
 
 ### Your own model (command)
 

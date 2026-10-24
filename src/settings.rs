@@ -624,6 +624,8 @@ pub struct View {
     pub shortcuts: Vec<ShortcutView>,
     pub microphone: MicrophoneView,
     pub transcriber: TranscriberView,
+    /// Hold Right ⌘ to dictate (`"dictation"`).
+    pub dictation: bool,
     pub lower_playback: bool,
     pub playback_level: u8,
     pub video_export: bool,
@@ -827,12 +829,15 @@ fn microphone_view(
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriberView {
-    /// What recordings use now: "apple", "hex" or "command".
+    /// What recordings use now: "apple", "hex", "openai" or "command".
     pub engine: &'static str,
     pub hex_title: &'static str,
     pub hex_enabled: bool,
     pub language: String,
     pub apple_locale: String,
+    /// An OpenAI key is saved (the key itself never leaves the config file).
+    pub openai_key_set: bool,
+    pub openai_language: String,
     pub models: Vec<ModelView>,
     /// The program's file name while `transcribeCommand` is usable (read, never run); Command
     /// is offered only then.
@@ -960,8 +965,9 @@ fn shortcut_view(
 pub enum Action {
     /// A settings control: `launchAtLogin`, `autoSend`, `videoExport`, `lowerPlayback` (bool),
     /// `playbackLevel` (u8), `microphone` ("default" or a device id), `transcriber`
-    /// ("apple"/"hex"/"command"), `hexModel` (an id), `hexLanguage` (a code), `appleLocale`
-    /// (a locale id or "auto"), `retention` (a preset id).
+    /// ("apple"/"hex"/"openai"/"command"), `hexModel` (an id), `hexLanguage` (a code),
+    /// `openaiApiKey` (the key; "" removes it), `openaiLanguage` (a code), `dictation` (bool),
+    /// `appleLocale` (a locale id or "auto"), `retention` (a preset id).
     Set {
         key: String,
         value: serde_json::Value,
@@ -1016,6 +1022,8 @@ pub enum Effect {
     Measure,
     /// The Apple Speech language changed.
     SpeechModel,
+    /// Dictation (hold Right ⌘) was turned on or off.
+    Dictation(bool),
     Relaunch,
     Tour,
     Close,
@@ -1222,6 +1230,26 @@ impl Panel {
                     write("hexLanguage", language.into());
                 }
             }
+            // The key is written as given and never logged; "" removes it. Saving one is
+            // choosing OpenAI.
+            ("openaiApiKey", serde_json::Value::String(key)) => {
+                let key = key.trim();
+                if key.is_empty() {
+                    write("openaiApiKey", serde_json::Value::Null);
+                } else {
+                    write("openaiApiKey", key.into());
+                    write("transcriber", "openai".into());
+                }
+            }
+            ("openaiLanguage", serde_json::Value::String(language)) => {
+                if let Some(language) = crate::hex::language_code(language) {
+                    write("openaiLanguage", language.into());
+                }
+            }
+            ("dictation", serde_json::Value::Bool(on)) => {
+                write("dictation", (*on).into());
+                return Effect::Dictation(*on);
+            }
             ("appleLocale", serde_json::Value::String(locale)) => {
                 let locale = locale.trim();
                 if locale.is_empty() || locale.eq_ignore_ascii_case("auto") {
@@ -1348,17 +1376,21 @@ impl Panel {
                 self.inputs.as_ref(),
                 self.status(Permission::Microphone) == Status::Granted,
             ),
+            dictation: config.dictation.unwrap_or(false),
             lower_playback: config.lower_playback.unwrap_or(false),
             playback_level: config.recording_volume(),
             transcriber: TranscriberView {
                 engine: match engine {
                     crate::transcribe::Engine::Command if command.is_some() => "command",
+                    crate::transcribe::Engine::OpenAi => "openai",
                     _ if menu.hex_checked => "hex",
                     _ => "apple",
                 },
                 hex_title: menu.hex_title,
                 hex_enabled: menu.hex_enabled,
                 language: crate::handoff::hex_language_from(&config),
+                openai_key_set: crate::handoff::openai_api_key_from(&config).is_some(),
+                openai_language: crate::handoff::openai_language_from(&config),
                 apple_locale: crate::handoff::apple_locale_from(&config)
                     .unwrap_or_else(|| "auto".into()),
                 models: menu
@@ -1665,6 +1697,10 @@ impl Session {
             }
             Effect::SpeechModel => {
                 crate::speech_model::restart();
+                Effect::None
+            }
+            Effect::Dictation(on) => {
+                crate::capture::set_dictation_enabled(on);
                 Effect::None
             }
             other => other,
@@ -2354,6 +2390,27 @@ mod tests {
         assert_eq!(panel.view(&host).transcriber.language, "auto");
         set(&mut panel, &mut host, "hexLanguage", "".into());
         assert_eq!(panel.view(&host).transcriber.language, "en");
+        // An OpenAI key chooses OpenAI; the view says only that one is saved.
+        assert!(!panel.view(&host).transcriber.openai_key_set);
+        set(&mut panel, &mut host, "openaiApiKey", " sk-test-123 ".into());
+        assert_eq!(read_json(&host.path)["openaiApiKey"], "sk-test-123");
+        assert_eq!(read_json(&host.path)["transcriber"], "openai");
+        let view = panel.view(&host);
+        assert!(view.transcriber.openai_key_set && view.transcriber.engine == "openai");
+        assert!(!serde_json::to_string(&view).unwrap().contains("sk-test"));
+        assert_eq!(view.transcriber.openai_language, "en");
+        set(&mut panel, &mut host, "openaiLanguage", " De ".into());
+        assert_eq!(panel.view(&host).transcriber.openai_language, "de");
+        set(&mut panel, &mut host, "openaiApiKey", "".into());
+        assert!(read_json(&host.path).get("openaiApiKey").is_none());
+        assert!(!panel.view(&host).transcriber.openai_key_set);
+        assert!(!panel.view(&host).dictation);
+        assert_eq!(
+            set(&mut panel, &mut host, "dictation", true.into()),
+            Effect::Dictation(true)
+        );
+        assert!(panel.view(&host).dictation);
+        set(&mut panel, &mut host, "transcriber", "hex".into());
         assert_eq!(panel.view(&host).transcriber.apple_locale, "auto");
         assert_eq!(
             set(&mut panel, &mut host, "appleLocale", "zh-TW".into()),

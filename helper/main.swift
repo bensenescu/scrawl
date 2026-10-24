@@ -5,6 +5,7 @@
 //                                                       live mirror window + native recording (JSON lines)
 //   scrawl-helper transcribe FILE [--locale ID]          SpeechAnalyzer transcript with word timings
 //   scrawl-helper transcribe-stream [--locale ID]        the same while recording: PCM on stdin, JSON lines (LiveTranscribe.swift)
+//   scrawl-helper openai-stream [--language CODE]      the same with OpenAI's GPT Live Transcribe; key in SCRAWL_OPENAI_API_KEY (OpenAITranscribe.swift)
 //   scrawl-helper speech-model [--install] [--locale ID] the speech model's status; install it (JSON lines)
 //   scrawl-helper frames MOVIE --out-dir DIR (--every MS | --at MS,MS…) [--max-edge PX]
 //   scrawl-helper audio MOVIE OUT.wav                   16 kHz mono PCM of every audio track, mixed
@@ -121,6 +122,8 @@ case "transcribe":
   runAsync { emit(try await Transcriber.transcribe(URL(filePath: arguments[1]), preferred: option("--locale", in: arguments))) }
 case "transcribe-stream":
   runAsync { try await LiveTranscriber.run(preferred: option("--locale", in: arguments)) }
+case "openai-stream":
+  runAsync { try await OpenAITranscriber.run(language: option("--language", in: arguments)) }
 case "speech-model":
   let install = arguments.contains("--install")
   runAsync { await SpeechModel.run(install: install, preferred: option("--locale", in: arguments)) }
@@ -169,5 +172,5 @@ case "qr":
   }
   emit(["qr": qr])
 default:
-  fail("usage: scrawl-helper devices|mirror|transcribe|transcribe-stream|speech-model|frames|audio|probe|export|shrink|permission-panel|permissions|sck-probe|onboarding|settings|qr …")
+  fail("usage: scrawl-helper devices|mirror|transcribe|transcribe-stream|openai-stream|speech-model|frames|audio|probe|export|shrink|permission-panel|permissions|sck-probe|onboarding|settings|qr …")
 }

@@ -76,6 +76,7 @@ const EVENT_LEFT_MOUSE_UP: u32 = 2;
 const EVENT_RIGHT_MOUSE_DOWN: u32 = 3;
 const EVENT_RIGHT_MOUSE_UP: u32 = 4;
 const EVENT_KEY_DOWN: u32 = 10;
+const EVENT_FLAGS_CHANGED: u32 = 12;
 const EVENT_SCROLL_WHEEL: u32 = 22;
 const EVENT_TAP_DISABLED_BY_TIMEOUT: u32 = u32::MAX - 1;
 const EVENT_TAP_DISABLED_BY_USER_INPUT: u32 = u32::MAX;
@@ -89,10 +90,14 @@ const FLAG_SHIFT: u64 = 1 << 17;
 const FLAG_CONTROL: u64 = 1 << 18;
 const FLAG_ALTERNATE: u64 = 1 << 19;
 const FLAG_COMMAND: u64 = 1 << 20;
+/// `NX_DEVICERCMDKEYMASK`: the right ⌘ key itself is down (device-dependent bits are kept).
+const FLAG_DEVICE_RIGHT_COMMAND: u64 = 0x10;
 
 /// The S key on the ANSI layout (`kVK_ANSI_S`).
 pub const KEY_S: u16 = 1;
 const KEY_ESCAPE: u16 = 53;
+/// `kVK_RightCommand`.
+const KEY_RIGHT_COMMAND: u16 = 54;
 const KEY_Z: u16 = 6;
 pub const KEY_V: u16 = 9;
 
@@ -1546,7 +1551,7 @@ fn spawn_key_tap(telemetry: Arc<SharedCaptureTelemetry>) {
     let spawned = thread::Builder::new()
         .name("scrawl-key-tap".into())
         .spawn(move || {
-            let mask = 1_u64 << EVENT_KEY_DOWN;
+            let mask = (1_u64 << EVENT_KEY_DOWN) | (1_u64 << EVENT_FLAGS_CHANGED);
             let user_info = Arc::into_raw(Arc::clone(&telemetry))
                 .cast_mut()
                 .cast::<c_void>();
@@ -1614,16 +1619,26 @@ unsafe extern "C" fn key_tap_callback(
         }
         return event;
     }
+    let flags = unsafe { CGEventGetFlags(event) };
+    let keycode = unsafe { CGEventGetIntegerValueField(event, KEYBOARD_EVENT_KEYCODE) } as u16;
+    if event_type == EVENT_FLAGS_CHANGED {
+        // Right ⌘ on its own is the dictation key (`crate::dictation`). The device bit says
+        // which ⌘ this is; the other modifiers down with it make it a chord, not a dictation.
+        if keycode == KEY_RIGHT_COMMAND {
+            let down = (flags & FLAG_DEVICE_RIGHT_COMMAND) != 0
+                && (flags & (FLAG_CONTROL | FLAG_ALTERNATE | FLAG_SHIFT)) == 0;
+            telemetry.right_cmd_changed(down);
+        }
+        return event;
+    }
     if event_type != EVENT_KEY_DOWN {
         return event;
     }
 
-    let flags = unsafe { CGEventGetFlags(event) };
     let cmd = (flags & FLAG_COMMAND) != 0;
     let ctrl = (flags & FLAG_CONTROL) != 0;
     let alt = (flags & FLAG_ALTERNATE) != 0;
     let shift = (flags & FLAG_SHIFT) != 0;
-    let keycode = unsafe { CGEventGetIntegerValueField(event, KEYBOARD_EVENT_KEYCODE) } as u16;
     if telemetry.matches_shortcut(keycode, cmd, ctrl, alt, shift) {
         // Holding S repeats the key; only a fresh press counts.
         if unsafe { CGEventGetIntegerValueField(event, KEYBOARD_EVENT_AUTOREPEAT) } == 0 {
@@ -1631,6 +1646,8 @@ unsafe extern "C" fn key_tap_callback(
         }
         return event;
     }
+    // Any other key while Right ⌘ is held is a ⌘ shortcut (or Esc): not a dictation.
+    telemetry.dictation_interrupted();
     if keycode == KEY_ESCAPE && !cmd && !ctrl {
         telemetry.escape_pressed.store(true, Ordering::Release);
     }

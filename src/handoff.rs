@@ -448,11 +448,20 @@ pub struct Config {
     /// Feature flag: shows **Export Last Capture as Video…** in the menu (default off).
     #[serde(default)]
     pub video_export: Option<bool>,
-    /// `"apple"` (default), `"hex"` or `"command"`: which engine transcribes recordings
-    /// (`transcribe`). The command's own keys are read by `transcribe_command`, not here, so a
-    /// malformed one can't reset this struct.
+    /// `"apple"` (default), `"hex"`, `"openai"` or `"command"`: which engine transcribes
+    /// recordings (`transcribe`). The command's own keys are read by `transcribe_command`, not
+    /// here, so a malformed one can't reset this struct.
     #[serde(default)]
     pub transcriber: Option<String>,
+    /// The OpenAI API key `"openai"` streams with (`live_transcribe`). Never logged or shown.
+    #[serde(default)]
+    pub openai_api_key: Option<String>,
+    /// The language OpenAI is told to expect (`"en"` by default).
+    #[serde(default)]
+    pub openai_language: Option<String>,
+    /// Hold Right ⌘ to dictate into the app in front, with no screen recording (`dictation`).
+    #[serde(default)]
+    pub dictation: Option<bool>,
     /// Lower the output volume while recording (`playback`) to `playbackLevel` percent of it.
     #[serde(default)]
     pub lower_playback: Option<bool>,
@@ -792,6 +801,38 @@ pub fn hex_language_from(config: &Config) -> String {
         .as_deref()
         .and_then(crate::hex::language_code)
         .unwrap_or_else(|| crate::hex::DEFAULT_LANGUAGE.into())
+}
+
+/// The OpenAI API key (`openaiApiKey`), if one is saved. Never log it.
+pub fn openai_api_key() -> Option<String> {
+    openai_api_key_from(&config())
+}
+
+pub fn openai_api_key_from(config: &Config) -> Option<String> {
+    config
+        .openai_api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_owned)
+}
+
+/// The language OpenAI is told to expect (`openaiLanguage`, default `en`).
+pub fn openai_language() -> String {
+    openai_language_from(&config())
+}
+
+pub fn openai_language_from(config: &Config) -> String {
+    config
+        .openai_language
+        .as_deref()
+        .and_then(crate::hex::language_code)
+        .unwrap_or_else(|| crate::hex::DEFAULT_LANGUAGE.into())
+}
+
+/// Whether holding Right ⌘ dictates (`dictation`, default off).
+pub fn dictation_enabled() -> bool {
+    config().dictation.unwrap_or(false)
 }
 
 /// The configured Apple Speech locale, or the Mac's own language when unset.

@@ -758,6 +758,8 @@ pub struct ScrawlCoordinator {
     shortcut: crate::shortcut::Shortcut,
     /// The modifiers held when the shortcut went down; releasing any of them starts the recording.
     hold_mods: u64,
+    /// Right ⌘ is held: the microphone records and the words will be pasted (`crate::dictation`).
+    dictation: Option<crate::dictation::Session>,
     /// `scrawl lab pill`: recordings are pretend (`CaptureSource::Lab`), the picker takes no
     /// input and opens no overlay, and nothing looks for windows or phones.
     lab: bool,
@@ -836,6 +838,7 @@ impl ScrawlCoordinator {
             gate: crate::onboarding::Gate::default(),
             shortcut: crate::shortcut::Shortcut::default(),
             hold_mods: 0,
+            dictation: None,
             lab: false,
         }
     }
@@ -1160,6 +1163,10 @@ impl ScrawlCoordinator {
             Activity::Recording {
                 elapsed_ms: rec.started.elapsed().as_millis() as u64,
             }
+        } else if let Some(dictation) = &self.dictation {
+            Activity::Recording {
+                elapsed_ms: dictation.elapsed_ms(),
+            }
         } else if self.is_processing() {
             Activity::Processing
         } else if self.is_selecting() {
@@ -1177,7 +1184,14 @@ impl ScrawlCoordinator {
 
     /// The capture shortcut went down (from Carbon, the event tap or the HID poller).
     pub fn press_shortcut(&mut self, cx: &mut Context<Self>) {
-        let activity = self.activity();
+        // ⌥⇧S while dictating: the words are pasted as if Right ⌘ came up, and the recording
+        // starts when the keys do.
+        let activity = if self.dictation.is_some() {
+            self.finish_dictation(cx);
+            crate::shortcut::Activity::Free
+        } else {
+            self.activity()
+        };
         if self.gate.is_pending() {
             return;
         }
@@ -1235,6 +1249,8 @@ impl ScrawlCoordinator {
     pub fn record_or_finish(&mut self, cx: &mut Context<Self>) {
         if self.is_recording() {
             self.finish_recording(cx);
+        } else if self.dictation.is_some() {
+            self.finish_dictation(cx);
         } else if self.is_selecting() {
             self.record_selected_mode(cx);
         } else if !self.is_processing() {
@@ -1865,7 +1881,8 @@ impl ScrawlCoordinator {
         let recording_ms = self
             .active_recording
             .as_ref()
-            .map(ActiveRecording::elapsed_ms);
+            .map(ActiveRecording::elapsed_ms)
+            .or_else(|| self.dictation.as_ref().map(|d| d.elapsed_ms()));
         let elapsed_ms = recording_ms.unwrap_or(self.last_elapsed_ms);
         let clock = format_clock(elapsed_ms);
         let has_iphone = self.iphone.is_some();
@@ -2757,7 +2774,113 @@ impl ScrawlCoordinator {
         }
     }
 
+    /// Right ⌘ (the dictation key) went down, came up, or was joined by another key. A tap
+    /// starts listening hands-free and the next tap finishes; a long hold finishes on release.
+    pub fn dictation_key(&mut self, key: crate::capture::DictationKey, cx: &mut Context<Self>) {
+        use crate::capture::DictationKey;
+        match key {
+            DictationKey::Down => {
+                if self.dictation.is_some() {
+                    // The second tap of a toggle.
+                    self.finish_dictation(cx);
+                    return;
+                }
+                if self.active_recording.is_some()
+                    || self.is_selecting()
+                    || self.is_processing()
+                    || self.lab
+                {
+                    return;
+                }
+                match crate::dictation::Session::start() {
+                    Ok(session) => {
+                        scrawl_log("dictation started");
+                        self.dictation = Some(session);
+                        self.present_recording_island(cx);
+                    }
+                    Err(error) => scrawl_log(format!("dictation: {error:#}")),
+                }
+            }
+            DictationKey::Up => {
+                let Some(session) = &self.dictation else { return };
+                if session.elapsed_ms() < crate::dictation::TAP_MS {
+                    // A tap: keep listening until the next tap (or Esc).
+                    scrawl_log("dictation: tap, listening until the next tap");
+                } else {
+                    self.finish_dictation(cx);
+                }
+            }
+            DictationKey::Interrupted => {
+                if let Some(session) = &self.dictation
+                    && session.elapsed_ms() < crate::dictation::TAP_MS
+                {
+                    scrawl_log("dictation interrupted by a key");
+                    self.cancel_dictation(cx);
+                }
+            }
+        }
+    }
+
+    /// Stops the microphone, transcribes and pastes in the background; the capsule shows
+    /// Processing until the words are pasted.
+    fn finish_dictation(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.dictation.take() else {
+            return;
+        };
+        scrawl_log("finish_dictation invoked");
+        self.set_island_phase(IslandPhase::Processing);
+        cx.notify();
+        cx.spawn(async move |entity, cx| {
+            cx.background_executor()
+                .spawn(async move {
+                    match session.finish() {
+                        Ok(done) if done.text.is_empty() => scrawl_log(format!(
+                            "Dictation: nothing heard in {} ms ({}, {} ms)",
+                            done.duration_ms, done.source, done.transcribe_ms
+                        )),
+                        Ok(done) => {
+                            scrawl_log(format!(
+                                "Dictation: {} words from {} ms ({}, transcribed in {} ms)",
+                                done.text.split_whitespace().count(),
+                                done.duration_ms,
+                                done.source,
+                                done.transcribe_ms
+                            ));
+                            if let Err(error) = crate::dictation::paste(&done.text) {
+                                scrawl_log(format!("Dictation paste failed: {error:#}"));
+                            }
+                        }
+                        Err(error) => scrawl_log(format!("Dictation failed: {error:#}")),
+                    }
+                })
+                .await;
+            let _ = entity.update(cx, |coord, cx| {
+                // A capture may have started meanwhile (⌥⇧S during the dictation).
+                if matches!(coord.island_phase, IslandPhase::Processing)
+                    && coord.active_recording.is_none()
+                {
+                    coord.dismiss_island(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn cancel_dictation(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.dictation.take() else {
+            return;
+        };
+        // Stopping joins the microphone thread; keep that off the UI loop.
+        std::thread::spawn(move || session.cancel());
+        if matches!(self.island_phase, IslandPhase::Recording) && self.active_recording.is_none() {
+            self.dismiss_island(cx);
+        }
+    }
+
     pub fn cancel_recording(&mut self, cx: &mut Context<Self>) {
+        if self.dictation.is_some() {
+            return self.cancel_dictation(cx);
+        }
         self.playback.take();
         scrawl_log("cancel_recording invoked");
         self.discard_recording();
@@ -2765,6 +2888,9 @@ impl ScrawlCoordinator {
     }
 
     pub fn finish_recording(&mut self, cx: &mut Context<Self>) {
+        if self.dictation.is_some() {
+            return self.finish_dictation(cx);
+        }
         self.playback.take();
         scrawl_log("finish_recording invoked");
         let Some(rec) = self.active_recording.take() else {
@@ -5479,6 +5605,7 @@ pub fn run_app(
                     while let Ok(ev) = ui_receiver.try_recv() {
                         loop_coord.update(cx, |coord, cx| match ev {
                             LiveOverlayEvent::CaptureShortcut => coord.press_shortcut(cx),
+                            LiveOverlayEvent::Dictation(key) => coord.dictation_key(key, cx),
                             LiveOverlayEvent::PasteLatestShortcut => {
                                 if !coord.is_recording() && !coord.is_selecting() {
                                     coord.paste_latest(cx);
@@ -5525,12 +5652,13 @@ pub fn run_app(
                     motion::poll_tune();
                     if loop_coord.read(cx).shortcut.is_pending() {
                         loop_coord.update(cx, |coord, cx| coord.tick_shortcut(cx));
-                    } else if loop_coord.read(cx).telemetry.take_escape()
-                        && loop_coord.read(cx).is_selecting()
-                    {
+                    } else if loop_coord.read(cx).telemetry.take_escape() {
                         // The picker may not have the keys (another app is active), but the
-                        // key tap sees Esc anyway.
-                        loop_coord.update(cx, |coord, cx| coord.cancel_recording(cx));
+                        // key tap sees Esc anyway; it also cancels a dictation.
+                        let coord = loop_coord.read(cx);
+                        if coord.is_selecting() || coord.dictation.is_some() {
+                            loop_coord.update(cx, |coord, cx| coord.cancel_recording(cx));
+                        }
                     }
                     if loop_coord.read(cx).gate.is_pending() {
                         loop_coord.update(cx, |coord, _| coord.tick_gate());

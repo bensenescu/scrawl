@@ -118,12 +118,25 @@ pub struct ScreenRecording {
     pub video_offset_ms: u64,
 }
 
+/// What the dictation key (Right ⌘, held) did, from the key tap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DictationKey {
+    /// Right ⌘ went down on its own: start listening.
+    Down,
+    /// Right ⌘ came up: finish and paste.
+    Up,
+    /// Another key went down while Right ⌘ was held (a ⌘ shortcut, Esc): nothing is dictated.
+    Interrupted,
+}
+
 /// Live UI events emitted by the global input monitor to drive Scrawl's HUD & Review windows.
 #[derive(Clone, Debug)]
 pub enum LiveOverlayEvent {
     /// ⌥⇧S (or the configured shortcut) went down; `shortcut::Shortcut` decides what it means.
     CaptureShortcut,
     PasteLatestShortcut,
+    /// Right ⌘ held, released or interrupted (`crate::dictation`), while dictation is on.
+    Dictation(DictationKey),
     UndoStroke,
     RequestSnapshot,
     /// The iPhone mirror ended on its own (unplugged, never found, or access denied).
@@ -683,6 +696,17 @@ impl Drop for ScreenCaptureSession {
 }
 
 /// Shared state collected by the global input monitor during an active capture session.
+/// Whether holding Right ⌘ dictates (`"dictation"` in the config; Settings › General).
+static DICTATION: AtomicBool = AtomicBool::new(false);
+
+pub fn set_dictation_enabled(on: bool) {
+    DICTATION.store(on, Ordering::Release);
+}
+
+pub fn dictation_enabled() -> bool {
+    DICTATION.load(Ordering::Acquire)
+}
+
 pub struct SharedCaptureTelemetry {
     pub active: AtomicBool,
     pub selecting: AtomicBool,
@@ -743,12 +767,16 @@ pub struct SharedCaptureTelemetry {
     agent_context: AtomicBool,
     /// A ⇧-press inside the target: when, where (global points) and on which frame.
     shift_press: Mutex<Option<(u64, f64, f64, TargetFrame)>>,
+    /// Right ⌘ is down on its own and dictation is listening for its release.
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    right_cmd_held: AtomicBool,
 }
 
 impl SharedCaptureTelemetry {
     pub fn new(ui_sender: flume::Sender<LiveOverlayEvent>) -> Arc<Self> {
         let shortcuts = crate::settings::Shortcuts::load();
         crate::settings::note_paste_label(&shortcuts.paste.label);
+        set_dictation_enabled(crate::handoff::dictation_enabled());
         Arc::new(Self {
             active: AtomicBool::new(false),
             selecting: AtomicBool::new(false),
@@ -790,7 +818,39 @@ impl SharedCaptureTelemetry {
             drag_start: Mutex::new(None),
             agent_context: AtomicBool::new(false),
             shift_press: Mutex::new(None),
+            right_cmd_held: AtomicBool::new(false),
         })
+    }
+
+    /// Right ⌘ went down or up (the key tap). Only a lone press starts a dictation, and any key
+    /// pressed while it's held interrupts it, so ⌘ shortcuts typed with the right hand stay
+    /// shortcuts.
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    pub fn right_cmd_changed(&self, down: bool) {
+        if !dictation_enabled() || self.shortcuts_paused.load(Ordering::Acquire) {
+            self.right_cmd_held.store(false, Ordering::Release);
+            return;
+        }
+        let was = self.right_cmd_held.swap(down, Ordering::AcqRel);
+        if down && !was {
+            let _ = self
+                .ui_sender
+                .try_send(LiveOverlayEvent::Dictation(DictationKey::Down));
+        } else if !down && was {
+            let _ = self
+                .ui_sender
+                .try_send(LiveOverlayEvent::Dictation(DictationKey::Up));
+        }
+    }
+
+    /// A key went down while Right ⌘ was held: it's a shortcut, not dictation.
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    pub fn dictation_interrupted(&self) {
+        if self.right_cmd_held.swap(false, Ordering::AcqRel) {
+            let _ = self
+                .ui_sender
+                .try_send(LiveOverlayEvent::Dictation(DictationKey::Interrupted));
+        }
     }
 
     /// Each source (Carbon or `RegisterHotKey`, the key tap or hook) reports the same press within

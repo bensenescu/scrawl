@@ -11,7 +11,8 @@ pub struct RecordedAudio {
     pub sample_count: usize,
     pub duration_ms: u64,
     pub wav_bytes: Vec<u8>,
-    /// The transcription that ran while recording, if one did (`live_transcribe`).
+    /// The transcription that ran while recording, if one did (`live_transcribe`: Apple or
+    /// OpenAI).
     pub live: crate::live_transcribe::Slot,
 }
 
@@ -45,14 +46,18 @@ impl AudioRecorder {
                 Ok(())
             })
             .context("Could not spawn microphone worker")?;
-        let live = crate::live_transcribe::wanted()
-            .then(|| crate::live_transcribe::Live::start(Arc::clone(&samples)))
-            .and_then(|live| {
-                live.inspect_err(|error| {
-                    crate::capture::scrawl_log(format!("Live transcription: {error:#}"));
-                })
-                .ok()
-            });
+        let live = if crate::live_transcribe::openai_wanted() {
+            Some(crate::live_transcribe::Live::start_openai(Arc::clone(&samples)))
+        } else {
+            crate::live_transcribe::wanted()
+                .then(|| crate::live_transcribe::Live::start(Arc::clone(&samples)))
+        }
+        .and_then(|live| {
+            live.inspect_err(|error| {
+                crate::capture::scrawl_log(format!("Live transcription: {error:#}"));
+            })
+            .ok()
+        });
         Ok(Self {
             worker: Some(worker),
             stop_sender: Some(stop_sender),

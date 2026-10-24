@@ -82,6 +82,8 @@ struct SettingsTranscriber: Decodable, Equatable {
   var hexEnabled = false
   var language = "en"
   var appleLocale = "auto"
+  var openaiKeySet = false
+  var openaiLanguage = "en"
   var models: [SettingsModelOption] = []
   var speech: SpeechStatus?
 
@@ -157,6 +159,7 @@ struct SettingsState: Decodable, Equatable {
   ]
   var microphone = SettingsMicrophone()
   var transcriber = SettingsTranscriber()
+  var dictation = false
   var videoExport = false
   var lowerPlayback = false
   var playbackLevel = 20
@@ -894,6 +897,22 @@ struct SettingsView: View {
           .foregroundStyle(SettingsTheme(scheme).text)
       }
       .frame(height: SettingsMetrics.titlebar)
+      .padding(.horizontal, SettingsMetrics.inset)
+      // Panes taller than the window (General with Dictation) scroll; the title stays put.
+      // ImageRenderer draws nothing inside a ScrollView, so renders keep the plain stack.
+      if model.rendering {
+        paneBody(pane)
+        Spacer(minLength: 0)
+      } else {
+        ScrollView(.vertical, showsIndicators: false) {
+          paneBody(pane)
+        }
+      }
+    }
+  }
+
+  private func paneBody(_ pane: SettingsPane) -> some View {
+    VStack(alignment: .leading, spacing: 0) {
       switch pane {
       case .general: general
       case .recording: recording
@@ -902,9 +921,10 @@ struct SettingsView: View {
       case .agents: agents
       case .about: about
       }
-      Spacer(minLength: 0)
     }
+    .frame(maxWidth: .infinity, alignment: .leading)
     .padding(.horizontal, SettingsMetrics.inset)
+    .padding(.bottom, SettingsMetrics.inset)
   }
 
   private var state: SettingsState { model.state }
@@ -937,6 +957,13 @@ struct SettingsView: View {
         Color.clear.frame(height: 14)
         ShortcutRecorder(model: model, clock: model.clock, shortcut: shortcut)
       }
+      SettingsHeader("Dictation")
+      SettingsGroup {
+        SettingsRow(title: "Right ⌘ dictates") {
+          SettingsSwitch(on: state.dictation) { model.set("dictation", $0) }
+        }
+      }
+      SettingsCaption(text: "Tap the right ⌘ key, talk, and tap it again: the words are pasted into the app in front. Holding it works too, as push-to-talk. Nothing on screen is recorded. Esc cancels, and a ⌘ shortcut typed with that key stays a shortcut. Needs Accessibility.")
     }
   }
 
@@ -945,6 +972,7 @@ struct SettingsView: View {
     let language = SettingsTranscriber.languageMenu(saved: t.appleLocale, speech: t.speech)
     var engines: [(id: String, title: String, enabled: Bool)] = [("apple", "Apple Speech", true)]
     engines.append(("hex", t.hexTitle, t.hexEnabled))
+    engines.append(("openai", "OpenAI (cloud)", true))
     if let command = t.command { engines.append(("command", "Command (\(command))", true)) }
     let chosenModel = t.models.first(where: \.chosen)
     let mic = state.microphone
@@ -991,11 +1019,23 @@ struct SettingsView: View {
         }
         if t.engine == "hex" {
           SettingsSeparator()
-          HexLanguageField(model: model, language: t.language)
+          LanguageField(model: model, key: "hexLanguage", title: "Hex language", language: t.language,
+            help: "Language code, e.g. en, nl or auto. Support depends on the Hex model; some ignore it. This does not follow Hex’s dictation language.")
+        }
+        if t.engine == "openai" {
+          SettingsSeparator()
+          OpenAIKeyRow(model: model, saved: t.openaiKeySet)
+          SettingsSeparator()
+          LanguageField(model: model, key: "openaiLanguage", title: "Language", language: t.openaiLanguage,
+            help: "Language code OpenAI is told to expect, e.g. en or de.")
         }
       }
       SettingsCaption(text: t.engine == "command"
         ? "Command runs transcribeCommand from config.json. If it fails, that recording uses Apple Speech."
+        : t.engine == "openai"
+        ? (t.openaiKeySet
+          ? "Your voice streams to OpenAI’s GPT Live Transcribe while you record, billed to your API key. Word times are estimates. If it fails, that recording uses Apple Speech."
+          : "Paste an OpenAI API key to stream your voice to GPT Live Transcribe. Until one is saved, recordings use Apple Speech.")
         : t.hexEnabled || t.engine == "hex"
         ? "Apple Speech times each word. Hex uses a model you have in Hex, and its word times are estimates."
         : "Apple Speech runs on this Mac and times each word. Hex shows up here while Hex is running.")
@@ -1616,6 +1656,12 @@ final class SettingsWindow: NSObject, NSApplicationDelegate, NSWindowDelegate {
     languageUnsupported.transcriber.appleLocale = "xx-XX"
     var command = base
     command.transcriber = SettingsTranscriber(engine: "command", command: "whisper-scrawl")
+    var openai = base
+    openai.transcriber = SettingsTranscriber(engine: "openai")
+    var openaiSaved = base
+    openaiSaved.transcriber = SettingsTranscriber(engine: "openai", openaiKeySet: true, openaiLanguage: "de")
+    var dictation = base
+    dictation.dictation = true
     var missing = base
     missing.permissions[0].status = "granted"
     missing.permissions[0].relaunch = true
@@ -1668,6 +1714,9 @@ final class SettingsWindow: NSObject, NSApplicationDelegate, NSWindowDelegate {
       ("general-lower-playback", .general, lowered),
       ("recording", .recording, base),
       ("recording-hex", .recording, hex),
+      ("recording-openai", .recording, openai),
+      ("recording-openai-saved", .recording, openaiSaved),
+      ("general-dictation", .general, dictation),
       ("recording-mic-chosen", .recording, micChosen),
       ("recording-mic-missing", .recording, micMissing),
       ("recording-mic-not-allowed", .recording, micNotAllowed),
@@ -1760,14 +1809,57 @@ private struct PlaybackLevelRow: View {
   }
 }
 
-private struct HexLanguageField: View {
+/// The OpenAI API key: a password field until one is saved, then "Key saved" and Remove. The
+/// saved key is never sent back to this window.
+private struct OpenAIKeyRow: View {
+  @Environment(\.settingsTheme) private var theme
   @ObservedObject var model: SettingsModel
+  let saved: Bool
+  @State private var draft = ""
+
+  private var normalized: String { draft.trimmingCharacters(in: .whitespacesAndNewlines) }
+  private func save() {
+    guard !normalized.isEmpty else { return }
+    model.set("openaiApiKey", normalized)
+    draft = ""
+  }
+  var body: some View {
+    SettingsRow(title: "API key") {
+      if saved {
+        Text("Key saved")
+          .font(.system(size: 14))
+          .foregroundStyle(theme.secondary)
+        SettingsButton(title: "Remove") { model.set("openaiApiKey", "") }
+      } else if model.rendering {
+        Text("sk-…").frame(width: 180, alignment: .leading).foregroundStyle(theme.secondary)
+      } else {
+        SecureField("sk-…", text: $draft)
+          .textFieldStyle(.roundedBorder)
+          .frame(width: 180)
+          .onSubmit { save() }
+          .accessibilityLabel("OpenAI API key")
+        Button("Save") { save() }
+          .disabled(normalized.isEmpty)
+      }
+    }
+    .help("Stored in ~/.config/scrawl/config.json, readable by you alone. Scrawl sends it to OpenAI only.")
+  }
+}
+
+private struct LanguageField: View {
+  @ObservedObject var model: SettingsModel
+  let key: String
+  let title: String
   let language: String
+  let help: String
   @State private var draft: String
 
-  init(model: SettingsModel, language: String) {
+  init(model: SettingsModel, key: String, title: String, language: String, help: String) {
     self.model = model
+    self.key = key
+    self.title = title
     self.language = language
+    self.help = help
     _draft = State(initialValue: language)
   }
 
@@ -1776,10 +1868,10 @@ private struct HexLanguageField: View {
     normalized.isEmpty || normalized.range(of: "^[a-z][a-z0-9-]{0,34}$", options: .regularExpression) != nil
   }
   private func apply() {
-    if valid { model.set("hexLanguage", normalized) }
+    if valid { model.set(key, normalized) }
   }
   var body: some View {
-    SettingsRow(title: "Hex language") {
+    SettingsRow(title: title) {
       // ImageRenderer cannot draw AppKit-backed text fields; keep previews readable.
       if model.rendering {
         Text(language).frame(width: 120, alignment: .leading)
@@ -1788,12 +1880,12 @@ private struct HexLanguageField: View {
           .textFieldStyle(.roundedBorder)
           .frame(width: 120)
           .onSubmit { apply() }
-          .accessibilityLabel("Hex language code")
+          .accessibilityLabel("\(title) code")
       }
       Button("Apply") { apply() }
         .disabled(!valid || (normalized.isEmpty ? "en" : normalized) == language)
     }
-    .help("Language code, e.g. en, nl or auto. Support depends on the Hex model; some ignore it. This does not follow Hex’s dictation language.")
+    .help(help)
     .onChange(of: language) { _, value in draft = value }
   }
 }

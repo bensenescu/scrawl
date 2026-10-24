@@ -5,6 +5,12 @@ edition = "2024"
 default-run = "scrawl"
 license = "MIT"
 
+[features]
+# Builds on a Mac without the Metal toolchain (Command Line Tools alone): gpui and Scrawl compile
+# their shaders at launch instead. `scripts/install-app.sh` turns it on when `xcrun metal` is
+# missing. Releases never use it.
+metal-source = ["gpui/runtime_shaders"]
+
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }

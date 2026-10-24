@@ -1,6 +1,6 @@
 # Capture: shortcuts, Mac recording, displays
 
-Read this before changing `src/shortcut.rs`, `src/capture.rs`, `src/screens.rs` or the picker and capsule placement in `src/ui.rs`.
+Read this before changing `src/shortcut.rs`, `src/capture.rs`, `src/dictation.rs`, `src/screens.rs` or the picker and capsule placement in `src/ui.rs`.
 
 ## Shortcuts (`src/shortcut.rs`, `is_capture_shortcut` in `src/capture.rs`)
 
@@ -9,6 +9,10 @@ A press of `⌥⇧S` (or the shortcut set in Settings), however long it's held, 
 Recording starts on the release rather than the press so nothing is captured while ⌥⇧ is still down (⇧ is the ink key), and Esc before the release cancels. The picker opens only from the menu's **Choose What to Record…** (or a chip), on the pointer's display and on the mode last used; there the shortcut records what it's on, and repeats of a held S never record (`handle_selection_key`'s `repeat`). While recording, a press finishes, ignoring one within 400 ms of the start.
 
 Carbon hotkeys and the key event tap report presses through `emit_capture_shortcut` (deduplicated within 90 ms); while a press waits for its release the UI loop polls the modifiers and takes Esc from the key tap (`tick_shortcut`, `take_escape`), so the release is seen whichever window has focus. Esc from the key tap also closes an open picker when another app has the keys.
+
+## Dictation (`src/dictation.rs`, `DictationKey` in `src/capture.rs`)
+
+Off by default (`"dictation": true`, Settings › General; `capture::set_dictation_enabled` mirrors it for the key tap). The key tap also takes `flagsChanged`: Right ⌘ (`kVK_RightCommand`, 54, with the device bit `NX_DEVICERCMDKEYMASK` saying it's that key, and no ⌃⌥⇧ with it) going down sends `LiveOverlayEvent::Dictation(Down)` and coming up `Up`; any key down while it's held sends `Interrupted` (the capture shortcut excepted, which goes its own way). The coordinator starts a `dictation::Session` (an `AudioRecorder`, so OpenAI or Apple's live stream runs as for a capture; no screen, no bundle) and shows the capsule's Recording pill with the timer. `Up` within `TAP_MS` was a tap: it keeps listening until the next `Down`, which finishes it (toggle); `Up` later is push-to-talk's release and finishes it too (Processing while `Session::finish` stops the microphone, writes a scratch WAV for Apple's batch recognizer, runs `transcribe::transcribe` and `dictation::paste`s the text: clipboard, then ⌘V once the modifiers are up; without Accessibility the text stays on the clipboard), then the pill dismisses. Esc, `Interrupted` within the first `TAP_MS` (a ⌘ chord), the pill's × or the menu cancel it. ⌥⇧S during a dictation finishes it (the words are pasted) and the shortcut carries on as from Free, so the capture starts when the keys come up (`press_shortcut`); the dictation's completion leaves the capsule alone if a capture is running by then. Nothing starts while a capture, the picker or processing is up, and a dictation counts as `Activity::Recording` for the shortcut.
 
 ## Mac captures (`src/capture.rs`)
 

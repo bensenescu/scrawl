@@ -120,6 +120,9 @@ fn compile_laser_shader() {
     }
 }
 
+/// Compiles a shader to a `.metallib` beside the binary's sources. Without the Metal toolchain
+/// (Command Line Tools alone don't ship `metal`; Xcode downloads it) the library is left empty and
+/// the app compiles the shader's source at launch instead (`metal_shader::library`).
 fn compile_metal_shader(src_rel: &str, name: &str) {
     let manifest_dir = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let output_dir = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
@@ -127,6 +130,18 @@ fn compile_metal_shader(src_rel: &str, name: &str) {
     let air = output_dir.join(format!("{name}.air"));
     let library = output_dir.join(format!("{name}.metallib"));
     println!("cargo:rerun-if-changed={}", source.display());
+
+    let has_metal = Command::new("xcrun")
+        .args(["--sdk", "macosx", "--find", "metal"])
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !has_metal {
+        println!(
+            "cargo:warning=no Metal toolchain (xcrun metal); {name} will be compiled from source at launch"
+        );
+        std::fs::write(&library, []).expect("write an empty metallib");
+        return;
+    }
 
     let metal = Command::new("xcrun")
         .args(["--sdk", "macosx", "metal", "-c", "-mmacosx-version-min=15.0"])

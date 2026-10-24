@@ -13,6 +13,7 @@ mod capture;
 mod command_line;
 mod command_transcriber;
 mod delivery;
+mod dictation;
 mod export;
 #[cfg(test)]
 mod feature_map;
@@ -27,6 +28,8 @@ mod keyframes;
 #[cfg(target_os = "macos")]
 mod laser_overlay;
 mod live_transcribe;
+#[cfg(target_os = "macos")]
+mod metal_shader;
 mod mic;
 mod model;
 mod native;
@@ -87,7 +90,7 @@ struct Cli {
 
 fn parse_engine(name: &str) -> Result<crate::transcribe::Engine, String> {
     crate::transcribe::Engine::parse(name)
-        .ok_or_else(|| "expected `apple`, `hex` or `command`".to_owned())
+        .ok_or_else(|| "expected `apple`, `hex`, `openai` or `command`".to_owned())
 }
 
 /// `scrawl hex status`: connection, models and what the next recording would use.
@@ -105,6 +108,9 @@ fn hex_status() {
     let next = |hex_model: Option<&str>| match (preferred, hex_model, &command) {
         (transcribe::Engine::Command, _, Ok(program)) => format!("Command ({})", program.name()),
         (transcribe::Engine::Hex, Some(model), _) => format!("Hex ({model})"),
+        (transcribe::Engine::OpenAi, _, _) if live_transcribe::openai_configured() => {
+            format!("OpenAI ({})", live_transcribe::OPENAI_MODEL)
+        }
         _ => transcribe::LOCAL_ENGINE_TITLE.to_owned(),
     };
     let configured = handoff::hex_model();
@@ -263,7 +269,7 @@ enum Command {
         /// Copy the summary to the clipboard.
         #[arg(long)]
         clipboard: bool,
-        /// Transcribe with `apple`, `hex` or `command` instead of the configured transcriber.
+        /// Transcribe with `apple`, `hex`, `openai` or `command` instead of the configured transcriber.
         #[arg(long, value_parser = parse_engine)]
         transcriber: Option<crate::transcribe::Engine>,
     },
@@ -301,7 +307,7 @@ enum Command {
         /// many times real time first, as if recording, so the finish only transcribes the tail.
         #[arg(long, hide = true, requires = "bench")]
         live_speed: Option<f64>,
-        /// Transcribe with `apple`, `hex` or `command` instead of the configured transcriber.
+        /// Transcribe with `apple`, `hex`, `openai` or `command` instead of the configured transcriber.
         #[arg(long, value_parser = parse_engine)]
         transcriber: Option<crate::transcribe::Engine>,
         /// Turn an experiment on for this run, as `"experiments"` in `config.json` would

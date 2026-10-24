@@ -32,6 +32,19 @@
       "docs": ["README.md#capture-controls", "docs/capture.md"]
     },
     {
+      "id": "dictation",
+      "group": "start",
+      "name": "Dictation",
+      "says": "Tap Right ⌘, talk, tap again (or hold and let go): the words are pasted into the app in front. No screen is recorded. ⌥⇧S while dictating pastes them and starts a capture.",
+      "status": "main",
+      "platforms": ["mac"],
+      "added": "2026-10-24",
+      "note": "Off by default: Settings › General › Dictation. Esc or any key typed with Right ⌘ cancels. Uses the configured transcriber (OpenAI streams while you talk).",
+      "shortcuts": [{ "keys": "Right ⌘ (tap or hold)", "does": "Dictate into the app in front" }],
+      "config": [{ "key": "dictation", "value": "true", "does": "Turn the Right ⌘ dictation key on" }],
+      "docs": ["README.md#dictation", "docs/capture.md"]
+    },
+    {
       "id": "switch-chips",
       "group": "start",
       "name": "Switch target as it starts",
@@ -382,7 +395,7 @@
       "platforms": ["mac"],
       "note": "Windows and Linux use Parakeet on device.",
       "config": [
-        { "key": "transcriber", "value": "\"apple\" | \"hex\" | \"command\"", "does": "Which engine transcribes" },
+        { "key": "transcriber", "value": "\"apple\" | \"hex\" | \"openai\" | \"command\"", "does": "Which engine transcribes" },
         { "key": "appleLocale", "value": "\"zh-TW\"", "does": "Apple Speech language; absent follows the Mac" }
       ],
       "docs": ["README.md#transcription"]
@@ -423,6 +436,21 @@
         { "key": "transcribeTimeoutSeconds", "value": "600", "does": "Its time limit" }
       ],
       "docs": ["README.md#your-own-model-command"]
+    },
+    {
+      "id": "openai-transcribe",
+      "group": "agent",
+      "name": "OpenAI (cloud)",
+      "says": "Streams your voice to OpenAI's GPT Live Transcribe while you record, with your own API key; falls back to Apple Speech if it fails.",
+      "status": "main",
+      "platforms": ["mac"],
+      "added": "2026-10-24",
+      "note": "Opt in under Settings › Recording › Transcription. Word times are estimates, like Hex's. The key lives in config.json (0600) and is never shown again.",
+      "config": [
+        { "key": "openaiApiKey", "value": "\"sk-…\"", "does": "The API key; absent means Apple Speech" },
+        { "key": "openaiLanguage", "value": "\"en\"", "does": "Language OpenAI is told to expect" }
+      ],
+      "docs": ["README.md#openai-cloud", "docs/keyframes-and-text.md"]
     },
 
     {
